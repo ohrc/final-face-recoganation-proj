@@ -1,0 +1,176 @@
+import cv2
+import tkinter as tk
+from tkinter import Label, Button, Frame
+from PIL import Image, ImageTk
+from fer import FER  # Importing the facial emotion recognition library
+import mediapipe as mp  # Importing the mediapipe library for hand tracking and face mesh
+from threading import Thread  # Importing threading for handling video capture
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Initialize face detection
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+# Initialize MediaPipe hands for hand tracking
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
+mp_draw = mp.solutions.drawing_utils
+
+# Initialize MediaPipe face mesh for eye tracking
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
+
+# Initialize eye detection
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+class App:
+    def __init__(self, window, window_title):  # Corrected constructor name
+        self.window = window
+        self.window.title(window_title)
+        
+        # Configure window background color
+        self.window.configure(bg='lightgrey')
+
+        # Open video source (default is camera)
+        self.video_source = 0
+        self.vid = cv2.VideoCapture(self.video_source)
+
+        # Create a frame for the canvas and buttons
+        self.frame = Frame(self.window, bg='lightgrey')
+        self.frame.pack(pady=10)
+
+        # Create canvas to display the video feed
+        self.canvas = tk.Canvas(self.frame, width=640, height=480, bg='black')
+        self.canvas.grid(row=0, column=0, columnspan=2, padx=10)
+
+        # Button to start recognition
+        self.btn_start = Button(self.frame, text="Start Recognition", command=self.start_recognition, width=20)
+        self.btn_start.grid(row=1, column=0, padx=10, pady=5)
+
+        # Button to stop recognition
+        self.btn_stop = Button(self.frame, text="Stop Recognition", command=self.stop_recognition, width=20)
+        self.btn_stop.grid(row=1, column=1, padx=10, pady=5)
+
+        # Button to show histogram
+        self.btn_histogram = Button(self.frame, text="Show Histogram", command=self.show_histogram, width=20)
+        self.btn_histogram.grid(row=2, column=0, columnspan=2, padx=10, pady=5)
+
+        # Label to display results
+        self.label = Label(self.frame, text="Result: ", bg='lightgrey')
+        self.label.grid(row=3, column=0, columnspan=2)
+
+        # Emotion label
+        self.emotion_label = Label(self.frame, text="Emotion: ", bg='lightgrey')
+        self.emotion_label.grid(row=4, column=0, columnspan=2)
+
+        self.recognition_active = False  
+        self.update_thread = None
+        self.emotion_counter = {}  # Dictionary to count emotions
+        self.window.mainloop()
+
+    def start_recognition(self):
+        self.recognition_active = True
+        self.label.config(text="Recognition Started...")  
+        if self.update_thread is None or not self.update_thread.is_alive():
+            self.update_thread = Thread(target=self.update)
+            self.update_thread.start()
+
+    def stop_recognition(self):
+        self.recognition_active = False
+        self.label.config(text="Result: ")  
+        self.emotion_label.config(text="Emotion: ")  # Reset emotion label
+
+    def update(self):
+        emotion_detector = FER()  # Move emotion detector outside the loop
+        while self.recognition_active:  # Capture frame-by-frame
+            ret, frame = self.vid.read()
+            if ret:
+                # Convert to RGB
+                image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                # Detect hands
+                results = hands.process(image_rgb)
+
+                # Convert to grayscale for face detection
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                # Detect faces
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                num_faces_detected = len(faces)
+
+                # Prepare to recognize emotions
+                emotion_description = ""
+                
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+                    # Analyze emotions
+                    emotions = emotion_detector.detect_emotions(frame[y:y+h, x:x+w])
+                    if emotions:
+                        top_emotion = max(emotions[0]['emotions'], key=emotions[0]['emotions'].get)
+                        emotion_description += f"{top_emotion}: {emotions[0]['emotions'][top_emotion]:.2f}, "
+                        
+                        # Count the emotions
+                        if top_emotion not in self.emotion_counter:
+                            self.emotion_counter[top_emotion] = 0
+                        self.emotion_counter[top_emotion] += 1
+
+                    # Detect eyes within the detected faces
+                    roi_gray = gray[y:y+h, x:x+w]  # Region of interest for eye detection
+                    eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                    for (ex, ey, ew, eh) in eyes:
+                        # Calculate the center of the eye
+                        eye_center = (x + ex + ew // 2, y + ey + eh // 2)
+                        cv2.circle(frame, eye_center, 5, (0, 0, 255), -1)  # Draw a red dot
+
+                # Update the result label
+                self.label.config(text=f"Result: {num_faces_detected} faces detected")
+                # Update the emotion label
+                self.emotion_label.config(text=f"Emotion: {emotion_description[:-2]}")  # Remove last comma and space
+
+                # Process detected hands and draw landmarks
+                if results.multi_hand_landmarks:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                # Real-time shape detection using contours
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale for contour detection
+                _, thresh = cv2.threshold(gray_frame, 127, 255, cv2.THRESH_BINARY)  # Apply binary thresholding
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                # Draw contours
+                for contour in contours:
+                    cv2.drawContours(frame, [contour], 0, (0, 255, 0), 2)  # Draw contour with green color
+
+                # Convert the image to PhotoImage
+                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(img)
+                imgtk = ImageTk.PhotoImage(image=img)
+                self.canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
+                self.canvas.image = imgtk  
+
+            self.window.update_idletasks()
+
+    def show_histogram(self):
+        # Plot Histogram of Detected Emotions
+        if self.emotion_counter:
+            emotions = list(self.emotion_counter.keys())
+            counts = list(self.emotion_counter.values())
+
+            plt.bar(emotions, counts, color='blue')
+            plt.xlabel('Emotions')
+            plt.ylabel('Counts')
+            plt.title('Emotion Counts Histogram')
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.show()
+        else:
+            print("No emotions detected yet.")
+
+    def __del__(self):  # Corrected destructor name
+        # Release the video source when the object is destroyed
+        if self.vid.isOpened():
+            self.vid.release()
+
+# Run the app
+App(tk.Tk(), "Visual Motion Face Recognition with Emotion and Hand Tracking")
